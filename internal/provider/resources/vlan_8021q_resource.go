@@ -23,8 +23,8 @@ var (
 )
 
 type vlan8021qResource struct {
-	client     client.Client
-	mutationMu *sync.Mutex
+	client      client.Client
+	vlanTableMu *sync.Mutex
 }
 
 type vlan8021qResourceModel struct {
@@ -82,7 +82,7 @@ func (r *vlan8021qResource) Configure(_ context.Context, req resource.ConfigureR
 	}
 
 	r.client = providerData.Client()
-	r.mutationMu = providerData.VLANMutationLock()
+	r.vlanTableMu = providerData.VLANTableLock()
 }
 
 func (r *vlan8021qResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
@@ -98,8 +98,8 @@ func (r *vlan8021qResource) ValidateConfig(ctx context.Context, req resource.Val
 }
 
 func (r *vlan8021qResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
-	r.lockMutation()
-	defer r.unlockMutation()
+	r.lockVLANTable()
+	defer r.unlockVLANTable()
 
 	var plan vlan8021qResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -116,8 +116,8 @@ func (r *vlan8021qResource) Create(ctx context.Context, req resource.CreateReque
 }
 
 func (r *vlan8021qResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
-	r.lockMutation()
-	defer r.unlockMutation()
+	r.lockVLANTable()
+	defer r.unlockVLANTable()
 
 	var state vlan8021qResourceModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
@@ -139,8 +139,8 @@ func (r *vlan8021qResource) Read(ctx context.Context, req resource.ReadRequest, 
 }
 
 func (r *vlan8021qResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	r.lockMutation()
-	defer r.unlockMutation()
+	r.lockVLANTable()
+	defer r.unlockVLANTable()
 
 	var plan vlan8021qResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -157,8 +157,8 @@ func (r *vlan8021qResource) Update(ctx context.Context, req resource.UpdateReque
 }
 
 func (r *vlan8021qResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
-	r.lockMutation()
-	defer r.unlockMutation()
+	r.lockVLANTable()
+	defer r.unlockVLANTable()
 
 	var state vlan8021qResourceModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
@@ -233,15 +233,15 @@ func (r *vlan8021qResource) apply(ctx context.Context, plan vlan8021qResourceMod
 	return refreshed, true
 }
 
-func (r *vlan8021qResource) lockMutation() {
-	if r.mutationMu != nil {
-		r.mutationMu.Lock()
+func (r *vlan8021qResource) lockVLANTable() {
+	if r.vlanTableMu != nil {
+		r.vlanTableMu.Lock()
 	}
 }
 
-func (r *vlan8021qResource) unlockMutation() {
-	if r.mutationMu != nil {
-		r.mutationMu.Unlock()
+func (r *vlan8021qResource) unlockVLANTable() {
+	if r.vlanTableMu != nil {
+		r.vlanTableMu.Unlock()
 	}
 }
 

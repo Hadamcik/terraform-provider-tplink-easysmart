@@ -7,10 +7,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 
+	"github.com/lucavb/terraform-provider-tplink-easysmart/internal/client/model"
 	"github.com/lucavb/terraform-provider-tplink-easysmart/internal/providerdata"
 )
 
@@ -42,7 +45,7 @@ func TestVLANValidateConfigRejectsUnsupportedNames(t *testing.T) {
 	}
 }
 
-func TestVLANResourcesShareMutationLock(t *testing.T) {
+func TestVLANResourcesShareTableLock(t *testing.T) {
 	ctx := context.Background()
 	providerData := &providerdata.Data{}
 	first := &vlan8021qResource{}
@@ -56,16 +59,16 @@ func TestVLANResourcesShareMutationLock(t *testing.T) {
 		}
 	}
 
-	if first.mutationMu == nil || second.mutationMu == nil || first.mutationMu != second.mutationMu {
-		t.Fatal("configured VLAN resources must share one mutation lock")
+	if first.vlanTableMu == nil || second.vlanTableMu == nil || first.vlanTableMu != second.vlanTableMu {
+		t.Fatal("configured VLAN resources must share one VLAN table lock")
 	}
 
-	first.lockMutation()
+	first.lockVLANTable()
 	acquired := make(chan struct{})
 	go func() {
-		second.lockMutation()
+		second.lockVLANTable()
 		close(acquired)
-		second.unlockMutation()
+		second.unlockVLANTable()
 	}()
 
 	select {
@@ -74,13 +77,134 @@ func TestVLANResourcesShareMutationLock(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	first.unlockMutation()
+	first.unlockVLANTable()
 
 	select {
 	case <-acquired:
 	case <-time.After(time.Second):
 		t.Fatal("second VLAN resource did not acquire the lock after release")
 	}
+}
+
+func TestPVIDAndVLANResourcesShareTableLock(t *testing.T) {
+	ctx := context.Background()
+	providerData := &providerdata.Data{}
+	vlanResource := &vlan8021qResource{}
+	pvidResource := &portPVIDResource{}
+
+	vlanResponse := resource.ConfigureResponse{}
+	vlanResource.Configure(ctx, resource.ConfigureRequest{ProviderData: providerData}, &vlanResponse)
+	pvidResponse := resource.ConfigureResponse{}
+	pvidResource.Configure(ctx, resource.ConfigureRequest{ProviderData: providerData}, &pvidResponse)
+	if vlanResponse.Diagnostics.HasError() || pvidResponse.Diagnostics.HasError() {
+		t.Fatalf("Configure() diagnostics: VLAN=%v PVID=%v", vlanResponse.Diagnostics, pvidResponse.Diagnostics)
+	}
+
+	if vlanResource.vlanTableMu == nil || pvidResource.vlanTableMu == nil || vlanResource.vlanTableMu != pvidResource.vlanTableMu {
+		t.Fatal("VLAN and PVID resources must share one VLAN table lock")
+	}
+
+	vlanResource.lockVLANTable()
+	acquired := make(chan struct{})
+	go func() {
+		pvidResource.lockVLANTable()
+		close(acquired)
+		pvidResource.unlockVLANTable()
+	}()
+
+	select {
+	case <-acquired:
+		t.Fatal("PVID resource acquired the VLAN table lock while the VLAN resource held it")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	vlanResource.unlockVLANTable()
+
+	select {
+	case <-acquired:
+	case <-time.After(time.Second):
+		t.Fatal("PVID resource did not acquire the VLAN table lock after release")
+	}
+}
+
+func TestPVIDApplyWaitsForVLANTableLock(t *testing.T) {
+	ctx := context.Background()
+	providerData := &providerdata.Data{}
+	vlanResource := &vlan8021qResource{}
+	pvidResource := &portPVIDResource{}
+
+	vlanResponse := resource.ConfigureResponse{}
+	vlanResource.Configure(ctx, resource.ConfigureRequest{ProviderData: providerData}, &vlanResponse)
+	pvidResponse := resource.ConfigureResponse{}
+	pvidResource.Configure(ctx, resource.ConfigureRequest{ProviderData: providerData}, &pvidResponse)
+	if vlanResponse.Diagnostics.HasError() || pvidResponse.Diagnostics.HasError() {
+		t.Fatalf("Configure() diagnostics: VLAN=%v PVID=%v", vlanResponse.Diagnostics, pvidResponse.Diagnostics)
+	}
+
+	fakeClient := &blockingPVIDClient{
+		vlanReadStarted: make(chan struct{}),
+		allowVLANRead:   make(chan struct{}),
+	}
+	pvidResource.client = fakeClient
+
+	vlanResource.lockVLANTable()
+	result := make(chan pvidApplyResult, 1)
+	go func() {
+		var diagnostics diag.Diagnostics
+		_, ok := pvidResource.apply(ctx, portPVIDResourceModel{
+			PortID: types.Int64Value(1),
+			PVID:   types.Int64Value(20),
+		}, &diagnostics)
+		result <- pvidApplyResult{ok: ok, diagnostics: diagnostics}
+	}()
+
+	select {
+	case <-fakeClient.vlanReadStarted:
+		t.Fatal("PVID apply read the VLAN table while a VLAN operation held the lock")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	vlanResource.unlockVLANTable()
+
+	select {
+	case <-fakeClient.vlanReadStarted:
+	case <-time.After(time.Second):
+		t.Fatal("PVID apply did not read the VLAN table after the lock was released")
+	}
+	close(fakeClient.allowVLANRead)
+
+	select {
+	case result := <-result:
+		if !result.ok || result.diagnostics.HasError() {
+			t.Fatalf("PVID apply failed: ok=%t diagnostics=%v", result.ok, result.diagnostics)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("PVID apply did not complete")
+	}
+}
+
+type pvidApplyResult struct {
+	ok          bool
+	diagnostics diag.Diagnostics
+}
+
+type blockingPVIDClient struct {
+	vlanReadStarted chan struct{}
+	allowVLANRead   chan struct{}
+}
+
+func (c *blockingPVIDClient) GetVLANs(context.Context) (model.VLANTable, error) {
+	close(c.vlanReadStarted)
+	<-c.allowVLANRead
+	return model.VLANTable{VLANs: []model.VLAN{{ID: 20}}}, nil
+}
+
+func (c *blockingPVIDClient) SetPortPVID(context.Context, int, int) error {
+	return nil
+}
+
+func (c *blockingPVIDClient) GetPVIDs(context.Context) ([]model.PortPVID, error) {
+	return []model.PortPVID{{PortID: 1, PVID: 20}}, nil
 }
 
 func vlanConfig(t *testing.T, vlanResource *vlan8021qResource, name string) tfsdk.Config {

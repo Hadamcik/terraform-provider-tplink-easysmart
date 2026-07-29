@@ -7,17 +7,17 @@ import (
 )
 
 type Data struct {
-	SwitchClient   client.Client
-	vlanMutationMu sync.Mutex
+	SwitchClient client.Client
+	vlanTableMu  sync.Mutex
 }
 
 func (d *Data) Client() client.Client {
 	return d.SwitchClient
 }
 
-// VLANMutationLock serializes VLAN table changes. The switch Web UI exposes a
-// single shared table, so concurrent Add/Modify requests can overwrite each
-// other's view of that table.
-func (d *Data) VLANMutationLock() *sync.Mutex {
-	return &d.vlanMutationMu
+// VLANTableLock serializes operations that read or mutate the shared VLAN
+// table. The switch Web UI can otherwise apply requests against stale table
+// state.
+func (d *Data) VLANTableLock() *sync.Mutex {
+	return &d.vlanTableMu
 }

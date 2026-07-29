@@ -3,6 +3,7 @@ package resources
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -10,7 +11,7 @@ import (
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
-	"github.com/lucavb/terraform-provider-tplink-easysmart/internal/client"
+	"github.com/lucavb/terraform-provider-tplink-easysmart/internal/client/model"
 )
 
 var (
@@ -20,7 +21,14 @@ var (
 )
 
 type portPVIDResource struct {
-	client client.Client
+	client      portPVIDClient
+	vlanTableMu *sync.Mutex
+}
+
+type portPVIDClient interface {
+	GetVLANs(context.Context) (model.VLANTable, error)
+	GetPVIDs(context.Context) ([]model.PortPVID, error)
+	SetPortPVID(context.Context, int, int) error
 }
 
 type portPVIDResourceModel struct {
@@ -58,7 +66,13 @@ func (r *portPVIDResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 }
 
 func (r *portPVIDResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	r.client = configureClient(req, resp)
+	providerData := configureProviderData(req, resp)
+	if providerData == nil {
+		return
+	}
+
+	r.client = providerData.Client()
+	r.vlanTableMu = providerData.VLANTableLock()
 }
 
 func (r *portPVIDResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -129,6 +143,9 @@ func (r *portPVIDResource) ImportState(ctx context.Context, req resource.ImportS
 }
 
 func (r *portPVIDResource) apply(ctx context.Context, plan portPVIDResourceModel, diags *diag.Diagnostics) (portPVIDResourceModel, bool) {
+	r.lockVLANTable()
+	defer r.unlockVLANTable()
+
 	if r.client == nil {
 		diags.AddError("Unconfigured resource client", "The provider client was not configured.")
 		return portPVIDResourceModel{}, false
@@ -180,6 +197,18 @@ func (r *portPVIDResource) apply(ctx context.Context, plan portPVIDResourceModel
 	}
 
 	return refreshed, true
+}
+
+func (r *portPVIDResource) lockVLANTable() {
+	if r.vlanTableMu != nil {
+		r.vlanTableMu.Lock()
+	}
+}
+
+func (r *portPVIDResource) unlockVLANTable() {
+	if r.vlanTableMu != nil {
+		r.vlanTableMu.Unlock()
+	}
 }
 
 func (r *portPVIDResource) readPortPVID(ctx context.Context, portID int64) (portPVIDResourceModel, bool, diag.Diagnostics) {
